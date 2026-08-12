@@ -390,25 +390,49 @@ print(f"Classes   : {train_gen.class_indices}")
 
 
 # ─────────────────────────────────────────────────────────────
-# CELL 7 — Build Model
+# CELL 7 — Build Model (updated with stronger regularisation)
 # ─────────────────────────────────────────────────────────────
 # %%
-def build_model(num_classes=5):
-    base = InceptionV3(weights="imagenet", include_top=False,
-                       input_shape=(299, 299, 3))
-    base.trainable = False
+from tensorflow.keras.applications import InceptionV3
+from tensorflow.keras.layers import (
+    Dense, GlobalAveragePooling2D, Dropout, BatchNormalization)
+from tensorflow.keras.models import Model
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras import regularizers
 
-    x      = base.output
-    x      = GlobalAveragePooling2D()(x)
-    x      = Dense(128, activation="relu")(x)
-    x      = Dropout(0.5)(x)
+def build_model(num_classes=5):
+    base = InceptionV3(
+        weights="imagenet",
+        include_top=False,
+        input_shape=(299, 299, 3)
+    )
+    base.trainable = False  # freeze pretrained weights
+
+    x = base.output
+    x = GlobalAveragePooling2D()(x)
+
+    # BatchNorm stabilises training and reduces validation oscillation
+    x = BatchNormalization()(x)
+
+    # L2 regularisation on Dense layer reduces overfitting
+    x = Dense(
+        128,
+        activation="relu",
+        kernel_regularizer=regularizers.l2(0.001)
+    )(x)
+
+    # Increased dropout from 0.5 to 0.6
+    x = Dropout(0.6)(x)
+
     output = Dense(num_classes, activation="softmax")(x)
 
     model = Model(inputs=base.input, outputs=output)
+
     model.compile(
         optimizer=Adam(learning_rate=LEARNING_RATE),
         loss="categorical_crossentropy",
-        metrics=["accuracy"])
+        metrics=["accuracy"]
+    )
     return model
 
 model = build_model()
@@ -416,23 +440,56 @@ model.summary()
 
 
 # ─────────────────────────────────────────────────────────────
-# CELL 8 — Train
+# CELL 8 — Train (updated with ReduceLROnPlateau callback)
 # ─────────────────────────────────────────────────────────────
 # %%
+from tensorflow.keras.callbacks import (
+    ModelCheckpoint, EarlyStopping, ReduceLROnPlateau)
+
 MODEL_PATH = os.path.join(RESULTS_DIR, "best_model.keras")
 
+callbacks = [
+    # Stop if val_loss does not improve for 7 epochs
+    EarlyStopping(
+        monitor="val_loss",
+        patience=7,
+        restore_best_weights=True,
+        verbose=1
+    ),
+    # Save best model based on val_accuracy
+    ModelCheckpoint(
+        MODEL_PATH,
+        save_best_only=True,
+        monitor="val_accuracy",
+        verbose=1
+    ),
+    # Reduce learning rate when val_loss plateaus
+    # This directly addresses the oscillating validation curve
+    ReduceLROnPlateau(
+        monitor="val_loss",
+        factor=0.5,       # halve the learning rate
+        patience=3,       # after 3 epochs of no improvement
+        min_lr=1e-6,
+        verbose=1
+    )
+]
+
 history = model.fit(
-    train_gen, epochs=EPOCHS,
+    train_gen,
+    epochs=EPOCHS,
     validation_data=val_gen,
-    callbacks=[
-        EarlyStopping(monitor="val_loss", patience=5,
-                      restore_best_weights=True, verbose=1),
-        ModelCheckpoint(MODEL_PATH, save_best_only=True,
-                        monitor="val_accuracy", verbose=1)
-    ],
+    callbacks=callbacks,
     verbose=1
 )
-print(f"\nTraining complete. Model saved: {MODEL_PATH}")
+
+print(f"\nTraining complete.")
+print(f"Best model saved to: {MODEL_PATH}")
+print(f"Final train accuracy    : "
+      f"{history.history['accuracy'][-1]*100:.2f}%")
+print(f"Final val accuracy      : "
+      f"{history.history['val_accuracy'][-1]*100:.2f}%")
+print(f"Best val accuracy seen  : "
+      f"{max(history.history['val_accuracy'])*100:.2f}%")
 
 
 # ─────────────────────────────────────────────────────────────
